@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Capturzilla HD
+Comment=Ver la capturadora Elgato a 1080p con control de volumen
+Comment[en]=Watch your capture card at 1080p with volume control
+Comment[ru]=Просмотр карты захвата в 1080p с регулировкой громкости
+Comment[uk]=Перегляд карти захоплення в 1080p з керуванням гучністю
+Exec=capturadora
+Icon=capturadora
+Terminal=false
+Categories=AudioVideo;Video;
