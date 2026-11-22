@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.0 — 2026-11-22
+
+### English
+
+- Much lower latency: the picture arrives about 1 s sooner. mpv gets only the picture and drops its buffers right after it starts, so it no longer lags on 60 fps sources.
+- The audio is played through a PipeWire loopback; the bar's volume and mute still control it.
+- No more crashes when switching sources, recording or losing the signal: a separate ffmpeg reads the device instead of mpv.
+- Finds the audio of each source by its USB port, so devices whose audio has a different name (e.g. Razer Ripsaw HD) get sound.
+- Stopping a recording no longer freezes the app, and several windows can be open at once.
+- Requires PipeWire's `pw-loopback`.
+
+### Español
+
+- Mucha menos latencia: la imagen llega cerca de 1 s antes. mpv recibe solo la imagen y vacía sus búferes apenas empieza, así que ya no se atrasa con fuentes de 60 fps.
+- El audio se reproduce con un loopback de PipeWire; el volumen y el silencio de la barra lo siguen controlando.
+- Ya no se cierra al cambiar de fuente, grabar o perder la señal: un ffmpeg aparte lee el dispositivo en vez de mpv.
+- Busca el audio de cada fuente por su puerto USB, así que los dispositivos cuyo audio tiene otro nombre (p. ej. Razer Ripsaw HD) tienen sonido.
+- Detener una grabación ya no congela la app, y se pueden abrir varias ventanas a la vez.
+- Requiere `pw-loopback` de PipeWire.
+
 ## 2.0.0 — 2026-11-22
 
 ### English

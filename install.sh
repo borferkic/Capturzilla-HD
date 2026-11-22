@@ -3,8 +3,8 @@
 set -e
 cd "$(dirname "$0")"
 
-for cmd in mpv ffmpeg v4l2-ctl pactl; do
-  command -v "$cmd" >/dev/null || echo "Missing / Falta: $cmd  (sudo pacman -S mpv ffmpeg v4l-utils libpulse)"
+for cmd in mpv ffmpeg v4l2-ctl pactl pw-loopback; do
+  command -v "$cmd" >/dev/null || echo "Missing / Falta: $cmd  (sudo pacman -S mpv ffmpeg v4l-utils libpulse pipewire)"
 done
 
 install -Dm755 bin/capturadora "$HOME/.local/bin/capturadora"

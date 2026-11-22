@@ -17,7 +17,7 @@
 
 **A minimal, low-latency viewer for your capture card or webcam on Omarchy: watch it live, control the volume, take screenshots and record, without OBS.**
 
-Latest release: `2.0.0`.
+Latest release: `2.1.0`.
 
 <div align="center">
   <img alt="Capturzilla HD with the bottom bar" src="docs/images/main.png" width="640" />
@@ -69,7 +69,7 @@ Latest release: `2.0.0`.
 ## Requirements
 
 - Omarchy or Arch Linux (Hyprland / Wayland), with a Nerd Font (Omarchy ships JetBrainsMono Nerd Font).
-- `mpv`, `ffmpeg`, `v4l-utils` and `libpulse` (`pactl`): `sudo pacman -S mpv ffmpeg v4l-utils libpulse`.
+- `mpv`, `ffmpeg`, `v4l-utils`, `libpulse` (`pactl`) and PipeWire (`pw-loopback`): `sudo pacman -S mpv ffmpeg v4l-utils libpulse pipewire`.
 - A UVC capture card or webcam (it works without drivers on Linux).
 - Recording needs an NVIDIA GPU with NVENC.
 
@@ -89,19 +89,19 @@ Latest release: `2.0.0`.
 ## How it works
 
 ```text
-Capture card / webcam (UVC, /dev/videoN) + its audio (PulseAudio / PipeWire)
-                     │
-        ┌────────────┴─────────────┐
-   Watching                    Recording
+Capture card / webcam (UVC, /dev/videoN)            its audio (PipeWire source)
+                     │                                        │
+        ┌────────────┴─────────────┐                 pw-loopback ──► speakers
+   Watching                    Recording             (volume and mute from the bar)
         │                          │
-  mpv reads the device     ffmpeg reads the device:
-  directly (low-latency)   ├─ MP4 file (h264_nvenc + AAC)
-        │                  └─ raw video through a FIFO ──► mpv
+  ffmpeg reads the device:  ffmpeg reads the device:
+  picture as is             ├─ MP4 file (h264_nvenc + AAC)
+  through a FIFO ──► mpv    └─ raw video through a FIFO ──► mpv
         ▼
   capturadora.lua: bar, gear menu, pause, languages and About (libass overlay)
 ```
 
-A capture card accepts only one reader at a time, so while recording ffmpeg owns the device and sends the picture to mpv through a FIFO. The preview pauses for about half a second when recording starts and stops.
+A capture card accepts only one reader at a time. mpv never opens the device itself (its built-in v4l2 reader can crash when the device is closed): an ffmpeg process reads it and sends the picture to mpv through a FIFO, and while recording another ffmpeg takes over, saves the MP4 and keeps feeding the FIFO. Only the picture goes to mpv; the audio is played by a PipeWire loopback, so mpv does not hold the picture back to sync it with the sound. About a second after the picture appears, mpv drops its buffers: with a 60 fps source on a 60 Hz screen it would never catch up on the frames queued at startup. The preview pauses for about half a second when recording starts and stops.
 
 ## Uninstall
 
@@ -126,7 +126,7 @@ If you like Capturzilla HD and find it useful, you can support its development t
 
 **Un visor mínimo y de baja latencia para tu capturadora o cámara web en Omarchy: mírala en vivo, controla el volumen, saca capturas y graba, sin OBS.**
 
-Última versión: `2.0.0`.
+Última versión: `2.1.0`.
 
 ### Funcionalidades
 
@@ -172,7 +172,7 @@ If you like Capturzilla HD and find it useful, you can support its development t
 ### Requisitos
 
 - Omarchy o Arch Linux (Hyprland / Wayland), con una Nerd Font (Omarchy trae JetBrainsMono Nerd Font).
-- `mpv`, `ffmpeg`, `v4l-utils` y `libpulse` (`pactl`): `sudo pacman -S mpv ffmpeg v4l-utils libpulse`.
+- `mpv`, `ffmpeg`, `v4l-utils`, `libpulse` (`pactl`) y PipeWire (`pw-loopback`): `sudo pacman -S mpv ffmpeg v4l-utils libpulse pipewire`.
 - Una capturadora o cámara web UVC (funciona sin drivers en Linux).
 - Para grabar hace falta una tarjeta NVIDIA con NVENC.
 
@@ -191,7 +191,7 @@ If you like Capturzilla HD and find it useful, you can support its development t
 
 ### Cómo funciona
 
-Una capturadora solo admite un lector a la vez. Para ver la imagen, mpv lee el dispositivo directamente con baja latencia. Al grabar, ffmpeg toma el dispositivo, guarda el MP4 (h264_nvenc + AAC) y le pasa la imagen a mpv por un FIFO. Por eso la vista se pausa medio segundo al empezar y al terminar de grabar. La barra, el menú, la pausa, los idiomas y el Acerca de están en `capturadora.lua`, dibujados con libass.
+Una capturadora solo admite un lector a la vez. mpv nunca abre el dispositivo (su lector v4l2 puede caerse al cerrarlo): lo lee un ffmpeg que le pasa la imagen por un FIFO, y al grabar otro ffmpeg toma el dispositivo, guarda el MP4 (h264_nvenc + AAC) y sigue enviando la imagen por el FIFO. A mpv solo le llega la imagen: el audio lo reproduce un loopback de PipeWire, con el volumen y el silencio de la barra, para que mpv no atrase la imagen para sincronizarla con el sonido. Un segundo después de que aparece la imagen, mpv vacía sus búferes: con una fuente de 60 fps en una pantalla de 60 Hz nunca recuperaría los cuadros que juntó al arrancar. La vista se pausa medio segundo al empezar y al terminar de grabar. La barra, el menú, la pausa, los idiomas y el Acerca de están en `capturadora.lua`, dibujados con libass.
 
 ### Desinstalar
 

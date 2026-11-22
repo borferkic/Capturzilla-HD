@@ -110,10 +110,11 @@ end
 
 -- Busca dispositivos de captura y elige para cada uno el mejor modo (prioriza 1080p, luego fps).
 local function scan_sources()
-  local list, name = {}, nil
+  local list, name, bus = {}, nil, nil
   for line in run({ "v4l2-ctl", "--list-devices" }):gmatch("[^\n]+") do
     if not line:match("^%s") then
       name = line:gsub("%s*%(.*$", ""):gsub(":.*$", "")
+      bus = line:match("%(usb%-([%x:%.]+%-[%d%.]+)%)") -- p. ej. 0000:80:14.0-4
     elseif name and line:match("/dev/video%d+") then
       local dev = line:match("(/dev/video%d+)")
       local best, fmt, w, h = nil, nil, nil, nil
@@ -131,18 +132,36 @@ local function scan_sources()
         end
       end
       if best then
-        list[#list + 1] = { name = name, dev = dev, mode = best }
+        list[#list + 1] = { name = name, dev = dev, mode = best, bus = bus }
       end
       name = nil -- solo el primer /dev/video de cada dispositivo captura imagen
     end
   end
-  -- Audio del mismo dispositivo, si existe (p. ej. "Cam Link" -> ...Cam_Link...).
-  local pulse = run({ "pactl", "list", "short", "sources" })
+  -- Audio del mismo dispositivo, si existe. Primero por el puerto USB (el nombre del audio
+  -- no siempre coincide, p. ej. "Razer Ripsaw HD" -> Razer_Razer_Ripsaw_...), luego por nombre.
+  local inputs, cur = {}, nil
+  for l in run({ "pactl", "list", "sources" }):gmatch("[^\n]+") do
+    local id = l:match("^%s*Name:%s*(%S+)")
+    if id then
+      cur = not id:match("%.monitor$") and { id = id } or nil
+      if cur then inputs[#inputs + 1] = cur end
+    end
+    local bp = l:match('device%.bus_path%s*=%s*"([^"]+)"')
+    if cur and bp then cur.bus_path = bp end
+  end
   for _, s in ipairs(list) do
-    local key = s.name:gsub(" ", "_")
-    for l in pulse:gmatch("[^\n]+") do
-      local id = l:match("^%d+%s+(%S+)")
-      if id and not id:match("%.monitor$") and id:find(key, 1, true) then s.audio = id; break end
+    if s.bus then
+      local ctrl, port = s.bus:match("^(.-)%-([%d%.]+)$")
+      local want = ctrl and ("pci-" .. ctrl .. "-usb-0:" .. port .. ":")
+      for _, i in ipairs(inputs) do
+        if want and i.bus_path and i.bus_path:sub(1, #want) == want then s.audio = i.id; break end
+      end
+    end
+    if not s.audio then
+      local key = s.name:gsub(" ", "_")
+      for _, i in ipairs(inputs) do
+        if i.id:find(key, 1, true) then s.audio = i.id; break end
+      end
     end
   end
   -- Si no, por nombre de tarjeta ALSA igual al de vídeo (p. ej. "Razer Ripsaw HD").
@@ -199,6 +218,84 @@ local function stop_loading()
   load_ov:remove()
 end
 
+-- La cámara la lee un ffmpeg aparte y le pasa la imagen a mpv por un FIFO: el lector v4l2 de
+-- ffmpeg dentro de mpv se cae (segfault) al cerrar la cámara con cuadros todavía en uso.
+local VIEW_DIR = (os.getenv("XDG_RUNTIME_DIR") or "/tmp") .. "/capturzilla-" .. utils.getpid() -- uno por ventana
+local VIEW_PIDF, VIEW_LOGF = VIEW_DIR .. "/view.pid", VIEW_DIR .. "/view.log"
+local view_n, view_fifo, view_entry = 0, nil, nil
+
+local function stop_view()
+  view_entry = nil
+  local f = io.open(VIEW_PIDF, "r")
+  local pid = f and f:read("*l"); if f then f:close() end
+  if pid and pid ~= "" then
+    run({ "sh", "-c", 'kill "$0" 2>/dev/null; for i in $(seq 30); do kill -0 "$0" 2>/dev/null || exit 0; sleep 0.1; done; kill -9 "$0"', pid })
+  end
+  os.remove(VIEW_PIDF)
+  if view_fifo then
+    -- Si mpv sigue esperando el FIFO (ffmpeg murió antes de abrirlo), abrirlo lo libera.
+    local h = io.open(view_fifo, "r+"); if h then h:close() end
+    os.remove(view_fifo); view_fifo = nil
+  end
+end
+
+local function start_view(s)
+  stop_view()
+  view_n = view_n + 1
+  view_fifo = VIEW_DIR .. "/view-" .. view_n .. ".nut"
+  os.remove(view_fifo)
+  run({ "mkdir", "-p", VIEW_DIR })
+  run({ "mkfifo", view_fifo })
+  -- Si ffmpeg termina (sin señal, cámara desconectada), se abre el FIFO para que mpv no se quede esperando.
+  -- Solo imagen: el audio lo pasa PipeWire aparte (start_audio), si no mpv retrasa la imagen para sincronizarla.
+  mp.command_native_async({ name = "subprocess", playback_only = false, detach = true, args = {
+    "sh", "-c", 'p=$0 f=$1 l=$2; shift 2; "$@" 2>"$l" & echo $! > "$p"; wait $!; [ -p "$f" ] && : 3<>"$f"',
+    VIEW_PIDF, view_fifo, VIEW_LOGF,
+    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+    "-f", "v4l2", "-input_format", s.mode.fmt == "YUYV" and "yuyv422" or "mjpeg",
+    "-video_size", s.mode.w .. "x" .. s.mode.h, "-framerate", tostring(s.mode.fps), "-i", s.dev,
+    "-map", "0:v", "-c:v", "copy", "-flush_packets", "1", "-f", "nut", view_fifo } }, function() end)
+  return view_fifo
+end
+
+-- Audio de la fuente directo a los parlantes con un loopback de PipeWire (baja latencia).
+-- La barra sigue usando el volumen y el silencio de mpv; se copian al loopback.
+local AUDIO_PIDF, AUDIO_NODE = VIEW_DIR .. "/audio.pid", "capturzilla-audio-" .. utils.getpid()
+local audio_idx -- índice del sink-input del loopback en PulseAudio
+
+local function stop_audio()
+  audio_idx = nil
+  local f = io.open(AUDIO_PIDF, "r")
+  local pid = f and f:read("*l"); if f then f:close() end
+  if pid and pid ~= "" then run({ "kill", pid }) end
+  os.remove(AUDIO_PIDF)
+end
+
+local function apply_volume()
+  if not audio_idx then
+    local cur
+    for l in run({ "pactl", "list", "sink-inputs" }):gmatch("[^\n]+") do
+      cur = l:match("^Sink Input #(%d+)") or cur
+      if l:find('node.name = "' .. AUDIO_NODE .. '"', 1, true) then audio_idx = cur; break end
+    end
+    if not audio_idx then return end
+  end
+  local vol = math.floor(mp.get_property_number("volume", 100) + 0.5)
+  run({ "pactl", "set-sink-input-volume", audio_idx, vol .. "%" })
+  run({ "pactl", "set-sink-input-mute", audio_idx, mp.get_property_bool("mute", false) and "1" or "0" })
+end
+
+local function start_audio(s)
+  stop_audio()
+  if not s.audio then return end
+  run({ "mkdir", "-p", VIEW_DIR })
+  mp.command_native_async({ name = "subprocess", playback_only = false, detach = true, args = {
+    "sh", "-c", 'echo $$ > "$0"; exec "$@" 2>/dev/null', AUDIO_PIDF,
+    "pw-loopback", "-n", AUDIO_NODE, "-l", "20", "-C", s.audio,
+    "--playback-props", "node.name=" .. AUDIO_NODE .. " media.name=Capturzilla application.name=Capturzilla" } }, function() end)
+  mp.add_timeout(0.5, apply_volume) -- cuando PipeWire ya creó el nodo
+end
+
 local function open_source(i)
   local s = sources[i]
   if not s then return end
@@ -206,13 +303,11 @@ local function open_source(i)
   if paused then paused = false; pause_ov:remove(); mp.set_property_bool("pause", false) end
   src_current = i
   start_loading(L("loading"))
-  mp.set_property_native("demuxer-lavf-o", {
-    video_size = s.mode.w .. "x" .. s.mode.h,
-    framerate = tostring(s.mode.fps),
-    input_format = s.mode.fmt == "YUYV" and "yuyv422" or "mjpeg",
-  })
-  mp.set_property_native("audio-files", s.audio and { "av://pulse:" .. s.audio } or {})
-  mp.commandv("loadfile", "av://v4l2:" .. s.dev, "replace")
+  mp.set_property_native("demuxer-lavf-o", {})
+  mp.set_property_native("audio-files", {})
+  local r = mp.command_native({ "loadfile", start_view(s), "replace" })
+  view_entry = r and r.playlist_entry_id
+  start_audio(s)
   mp.osd_message(L("source") .. ": " .. src_label(s), 2)
 end
 
@@ -238,7 +333,7 @@ local function short_path(f) return (f:gsub("^" .. (os.getenv("HOME") or "~"):gs
 local function stamp() return os.date("Capturzilla_%Y-%m-%d_%H-%M-%S") end
 local function live()
   local p = mp.get_property("path") or ""
-  return p:find("^av://v4l2") ~= nil or p == FIFO
+  return (view_fifo ~= nil and p == view_fifo) or p == FIFO
 end
 
 local function take_screenshot()
@@ -303,16 +398,17 @@ local function start_rec()
     "-f", "v4l2", "-input_format", s.mode.fmt == "YUYV" and "yuyv422" or "mjpeg",
     "-video_size", s.mode.w .. "x" .. s.mode.h, "-framerate", tostring(s.mode.fps), "-i", s.dev }
   local function add(...) for _, v in ipairs({ ... }) do a[#a + 1] = v end end
-  if s.audio then add("-f", "pulse", "-i", s.audio) end
+  if s.audio then add("-f", "pulse", "-fragment_size", "1920", "-i", s.audio) end
   add("-map", "0:v")
   if s.audio then add("-map", "1:a", "-c:a", "aac", "-b:a", "192k") end
   add("-vf", "format=yuv420p", "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0",
     "-movflags", "+frag_keyframe+empty_moov+default_base_moof", file,
-    "-map", "0:v", "-c:v", "rawvideo", "-f", "nut", FIFO)
+    "-map", "0:v", "-c:v", "rawvideo", "-flush_packets", "1", "-f", "nut", FIFO) -- el audio sigue por el loopback
   if paused then paused = false; pause_ov:remove(); mp.set_property_bool("pause", false) end
   rec = { file = file, t0 = mp.get_time() }
   start_loading(L("rec_starting"))
   -- mpv suelta la capturadora y espera la imagen por el FIFO; luego arranca ffmpeg.
+  stop_view()
   mp.set_property_native("demuxer-lavf-o", {})
   mp.commandv("loadfile", FIFO, "replace")
   mp.add_timeout(0.5, function()
@@ -324,7 +420,7 @@ local function start_rec()
       local pid = rec_pid()
       if mp.get_time() - rec.t0 > 2 and not alive(pid) then
         -- ffmpeg terminó (detenido o con error): si mpv sigue esperando el FIFO, se libera abriéndolo.
-        local f = io.open(FIFO, "w"); if f then f:close() end
+        local f = io.open(FIFO, "r+"); if f then f:close() end -- r+ no se bloquea si mpv ya lo cerró
         finish_rec()
       else
         draw_rec()
@@ -364,7 +460,7 @@ local function text(x, y, an, size, color, s, font)
 end
 
 -- Ventana "Acerca de" (mismo contenido que el de BT Device Battery Info).
-local VERSION = "2.0.0"
+local VERSION = "2.1.0"
 local SOCIAL = {
   { name = "Instagram", icon = "\u{f16d}", url = "https://www.instagram.com/borissdk/" },
   { name = "Twitch", icon = "\u{f1e8}", url = "https://www.twitch.tv/borizillaTV" },
@@ -800,13 +896,16 @@ mp.observe_property("mouse-pos", "native", function(_, m)
   if dragging then set_from_x(m.x) end
   if m.hover then show() end
 end)
-mp.observe_property("volume", "number", render)
-mp.observe_property("mute", "bool", render)
+mp.observe_property("volume", "number", function() apply_volume(); render() end)
+mp.observe_property("mute", "bool", function() apply_volume(); render() end)
 mp.observe_property("osd-dimensions", "native", render)
 
 mp.register_event("end-file", function(e)
   if rec then return end -- durante la grabación lo maneja finish_rec
-  if e.reason == "error" and sources[src_current] then
+  -- Solo cuando se corta la fuente actual (error o ffmpeg terminó), no al cambiarla a propósito.
+  if (e.reason == "error" or e.reason == "eof") and view_entry and e.playlist_entry_id == view_entry and sources[src_current] then
+    stop_view()
+    stop_audio()
     stop_loading()
     -- Vuelve al fondo de espera para que la ventana no se cierre.
     mp.set_property_native("demuxer-lavf-o", {})
@@ -818,12 +917,22 @@ mp.register_event("end-file", function(e)
 end)
 
 -- Quita la animación cuando ya hay imagen de una fuente real (no del fondo de espera).
+-- Al abrir, mpv junta cuadros mientras arranca y, como el monitor va a los mismos fps que la fuente,
+-- nunca recupera ese atraso: un segundo después se vacían sus búferes para mostrar la imagen al día.
+local drop_timer
+mp.register_event("start-file", function() if drop_timer then drop_timer:kill(); drop_timer = nil end end)
 mp.register_event("playback-restart", function()
-  if live() then stop_loading() end
+  if not live() then return end
+  stop_loading()
+  if drop_timer then return end
+  drop_timer = mp.add_timeout(1, function() if live() then mp.command("drop-buffers") end end)
 end)
 
 -- Al cerrar la ventana (Super+W) durante una grabación, se detiene ffmpeg para no perderla.
 mp.register_event("shutdown", function()
+  stop_view()
+  stop_audio()
+  os.remove(VIEW_LOGF); os.remove(VIEW_DIR)
   local pid = rec and rec_pid()
   if pid then
     run({ "sh", "-c", 'kill -INT "$0"; for i in $(seq 40); do kill -0 "$0" 2>/dev/null || exit 0; sleep 0.1; done', pid })
