@@ -2,7 +2,7 @@
 # Capturzilla HD: visor de capturadora/cámara (prioriza la Elgato Cam Link) con su audio.
 # Barra inferior de volumen y engrane con fuente y calidad: ~/.config/capturadora/capturadora.lua
 # Atajos: rueda/9/0 volumen, m silenciar, s captura, r grabar. Se cierra con Super+W.
-exec mpv "av://lavfi:color=c=0x101318:s=1280x720:r=30" --idle=yes --force-window=yes \
+exec mpv "av://lavfi:color=c=0x101318:s=1280x720:r=30" --idle=yes --force-window=yes --window-dragging=no --input-builtin-dragging=no \
   --profile=low-latency --untimed --cache=no --hwdec=no \
   --osc=no --osd-level=1 --osd-bar=no --input-default-bindings=yes \
   --script="$HOME/.config/capturadora/capturadora.lua" \
