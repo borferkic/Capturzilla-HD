@@ -201,7 +201,6 @@ local function src_label(s)
   return string.format("%s · %dp %d fps", short_name(s.name), s.mode.h, s.mode.fps)
 end
 
--- Animación de carga (GIF del dinosaurio, 4 cuadros BGRA premultiplicados de 200x256).
 local PLACEHOLDER = "av://lavfi:color=c=0x101318:s=1280x720:r=30" -- igual que en ~/.local/bin/capturadora
 local load_ov = mp.create_osd_overlay("ass-events")
 
